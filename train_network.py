@@ -15,7 +15,7 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 
 ENV_NAME = "BreakoutNoFrameskip-v4"
-MAX_FRAMES = 2*10**5
+MAX_FRAMES = 2*10**6
 SAVE_NETWORK_FRAMES = [0, 10**5, 2*10**5, 10**6, 5*10**6, 10**7, 25*10**6]
 
 MINIBATCH_SIZE = 32
@@ -41,95 +41,104 @@ TGT_NET_UPDATE_FREQ = 10000
 Experience = collections.namedtuple('Experience', ['state', 'action', 'reward',
                                                    'is_done', 'new_state'])
 
-class Buffer():
+class clist():
     def __init__(self, max_size):
-        self.buffer = [None] * max_size
-        self.size = 0
-        self.index = 0
+        self._list = [None]*max_size
+        self._max_size = max_size
+        self._size = 0
+        self._index = 0
+    
+    def append(self, object):
+        return_idx = self._index
+        self._list[self._index] = object
+        self._size = min(self._size+1, self._max_size)
+        self._index = (self._index + 1) % self._max_size
+        return return_idx
+
+    def __getitem__(self, idx):
+        if self._size > 0:
+            return self._list[idx % self._size]
+        else:
+            return None
 
     def __len__(self):
-        return self.size
+        return self._size
 
-    def append(self, objects):
-        self.buffer[self.index] = objects
-        self.size = min(self.size+1, self.max_size)
-        self.index = (self.index + 1) % self.max_size
+    def __setitem__(self, idx, value):
+        assert idx < self._max_size, "index out of range"
+        self._list[idx] = value
 
-    def __getitem__(self, index):
-        return self.buffer[index]
+    def index(self, value, start, stop):
+        index = None
+        for i in range(start, stop):
+            if np.all(value == self.__getitem__(i)):
+                index = i
+        return index
 
-class LazyFrames(Buffer):
+
+class LazyFrames():
     def __init__(self, max_size):
-        super().__init__(max_size+AGENT_HIST_LENGTH-1)
+        self.buffer = clist(max_size)
+        self.last_frame = 0
         self.hist_check_len = AGENT_HIST_LENGTH - 1
 
-    def append(self, objects):
+    def append(self, frame):
         """
             Only adds frame if it does not already exist among previous frames.
         """
-        assert_frames = [self.buffer[i % self.size] for i in 
-                         range(self.index-self.hist_check_len,
-                        self.index)]
-        if objects not in assert_frames:
-            self.buffer[self.index]
-            self.size = min(self.size+1, self.max_size)
-            self.index = (self.index + 1) % self.max_size
-        return self.index
-    
-    def crange(self, start, stop):
-        for i in range(start, stop):
-            return i % self.size
+        start = self.last_frame-self.hist_check_len
+        stop = self.last_frame
+        obj_idx = self.buffer.index(frame, start, stop)
+
+        if not obj_idx:
+            obj_idx = self.buffer.append(frame)
+        else:
+            obj_idx = self.last_frame
+        return obj_idx
 
     def __getitem__(self, idx):
         """ Return stack of frames """
-        frames = [self.buffer[i % self.size] 
+        frames = [self.buffer[i] 
                  for i in range(idx, idx+AGENT_HIST_LENGTH)]
-        return np.stack(stack)
+        return np.stack(frames)
 
-class LazyFrameStack(Buffer):
+class LazyFrameStack():
     def __init__(self, max_size):
-        self.state_indexes = [None]*max_size
-        self.states = LazyFrames(max_size)
-        self.max_size = max_size
-        self.size = 0
-        self.index = 0
+        self.state_indexes = clist(max_size+1)
+        self.states = LazyFrames(max_size+AGENT_HIST_LENGTH)
 
-    def append(self, state, new_state): 
+    def append(self, state): 
         index = None
         for frame in state: 
             index = self.states.append(frame) if index is None else index
 
-        for frame in new_state:
-            self.states.append(frame)
-
-        self.state_indexes[self.index] = index
-        self.size = min(self.size+1, self.max_size)
-        self.index = (self.index + 1) % self.max_size
+        return_idx = self.state_indexes.append(index)
+        return return_idx 
 
     def __getitem__(self, idx):
-        state_idx = self.frame_indexes[idx]
-        new_state_idx = state_idx + 1
-        states = self.states[state_idx], self.states[new_state_idx]
-        return states
+        state_idx = self.state_indexes[idx]
+        state = self.states[state_idx]
+        return state
         
 class ExperienceBuffer():
     def __init__(self, max_size):
-        self.buffer = [None]*max_size
-        self.state_buffer = [None]*(max_size+3)
-        self.max_size = max_size
-        self.size = 0
-        self.index = 0
+        self.buffer = clist(max_size)
+        self.state_buffer = LazyFrameStack(max_size)
  
     def __len__(self):
-        return self.size
+        return len(self.buffer)
     
     def append(self, experience):
-        self.buffer[self.index] = experience
-        self.size = min(self.size+1, self.max_size)
-        self.index = (self.index + 1) % self.max_size
+        state, action, reward, is_done, new_state = experience
+        state_idx = self.state_buffer.append(state)
+        new_state_idx = self.state_buffer.append(new_state)
+        lazy_experience = Experience(self.state_buffer[state_idx],
+                                     action, reward, is_done,
+                                     self.state_buffer[new_state_idx])
+        self.buffer.append(lazy_experience)
 
     def get_random_batch(self, batch_size):
-        indices = random.sample(range(self.size), batch_size)
+        indices = random.sample(range(len(self.buffer)), batch_size)
         states, actions, rewards, dones, next_states = zip(*[self.buffer[i] for i in indices])
         return np.array(states), np.array(actions), \
             np.array(rewards, dtype=np.float32), \
