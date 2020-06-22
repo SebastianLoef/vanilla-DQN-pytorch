@@ -67,8 +67,10 @@ class LazyFrames(Buffer):
         """
             Only adds frame if it does not already exist among previous frames.
         """
-        assert_frame_slice = range(self.index-self.hist_check_len, self.index)
-        if objects not in self.buffer[assert_frame_slice]:
+        assert_frames = [self.buffer[i % self.size] for i in 
+                         range(self.index-self.hist_check_len,
+                        self.index)]
+        if objects not in assert_frames:
             self.buffer[self.index]
             self.size = min(self.size+1, self.max_size)
             self.index = (self.index + 1) % self.max_size
@@ -78,34 +80,38 @@ class LazyFrames(Buffer):
         for i in range(start, stop):
             return i % self.size
 
-    def __getitem__(self, index):
+    def __getitem__(self, idx):
         """ Return stack of frames """
         frames = [self.buffer[i % self.size] 
-                 for i in range(index, index+AGENT_HIST_LENGTH)]
+                 for i in range(idx, idx+AGENT_HIST_LENGTH)]
         return np.stack(stack)
 
 class LazyFrameStack(Buffer):
     def __init__(self, max_size):
-        self.states = [None]*max_size
-        self.new_states = [None]*max_size
-        self.frames = LazyFrames(max_size)
+        self.state_indexes = [None]*max_size
+        self.states = LazyFrames(max_size)
+        self.max_size = max_size
+        self.size = 0
+        self.index = 0
 
     def append(self, state, new_state): 
         index = None
         for frame in state: 
-            index = self.frames.append(frame) if index is None else index
+            index = self.states.append(frame) if index is None else index
 
         for frame in new_state:
-            self.frames.append(frame)
+            self.states.append(frame)
 
+        self.state_indexes[self.index] = index
+        self.size = min(self.size+1, self.max_size)
+        self.index = (self.index + 1) % self.max_size
+
+    def __getitem__(self, idx):
+        state_idx = self.frame_indexes[idx]
+        new_state_idx = state_idx + 1
+        states = self.states[state_idx], self.states[new_state_idx]
+        return states
         
-
-
-
-
-
-
-
 class ExperienceBuffer():
     def __init__(self, max_size):
         self.buffer = [None]*max_size
@@ -116,9 +122,7 @@ class ExperienceBuffer():
  
     def __len__(self):
         return self.size
-    def lazyframe_check(self, frames):
-        for frame 
-
+    
     def append(self, experience):
         self.buffer[self.index] = experience
         self.size = min(self.size+1, self.max_size)
