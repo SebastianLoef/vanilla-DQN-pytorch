@@ -47,7 +47,7 @@ class clist():
         self._max_size = max_size
         self._size = 0
         self._index = 0
-    
+
     def append(self, object):
         return_idx = self._index
         self._list[self._index] = object
@@ -57,7 +57,7 @@ class clist():
 
     def __getitem__(self, idx):
         if self._size > 0:
-            return self._list[idx % self._size]
+            return self._list[idx % self._max_size]
         else:
             return None
 
@@ -68,84 +68,88 @@ class clist():
         assert idx < self._max_size, "index out of range"
         self._list[idx] = value
 
-    def index(self, value, start, stop):
-        index = None
-        for i in range(start, stop):
-            if np.all(value == self.__getitem__(i)):
-                index = i
-        return index
-
-
 class LazyFrames():
     def __init__(self, max_size):
         self.buffer = clist(max_size)
         self.last_frame = 0
-        self.hist_check_len = AGENT_HIST_LENGTH - 1
 
     def append(self, frame):
         """
             Only adds frame if it does not already exist among previous frames.
         """
-        start = self.last_frame-self.hist_check_len
-        stop = self.last_frame
-        obj_idx = self.buffer.index(frame, start, stop)
+        frame_idx = self.buffer.append(frame)
+        self.last_frame = frame_idx
+        return frame_idx
 
-        if not obj_idx:
-            obj_idx = self.buffer.append(frame)
-        else:
-            obj_idx = self.last_frame
-        return obj_idx
-
-    def __getitem__(self, idx):
+    def __getitem__(self, indices):
         """ Return stack of frames """
-        frames = [self.buffer[i] 
-                 for i in range(idx, idx+AGENT_HIST_LENGTH)]
+        frames = [self.buffer[i] for i in indices]
         return np.stack(frames)
 
 class LazyFrameStack():
     def __init__(self, max_size):
         self.state_indexes = clist(max_size+1)
-        self.states = LazyFrames(max_size+AGENT_HIST_LENGTH)
+        self.states = LazyFrames(int(1.2*max_size))
+        self.is_done = True
+        self.prev_idx = 0
 
-    def append(self, state): 
-        index = None
-        for frame in state: 
-            index = self.states.append(frame) if index is None else index
-
-        return_idx = self.state_indexes.append(index)
-        return return_idx 
+    def append(self, state, new_state, is_done):
+        state_idx = None
+        if self.is_done:
+            indices = []
+            for frame in state:
+                indices.append(self.states.append(frame))
+            state_idx = self.state_indexes.append(indices)
+            self.is_done = False
+            self.prev_idx = state_idx
+        last_frame_idx = self.states.append(new_state[-1])
+        indices = self.state_indexes[self.prev_idx][1:] + [last_frame_idx]
+        new_state_idx = self.state_indexes.append(indices)
+        if state_idx is None:
+            state_idx = new_state_idx - 1
+        
+        self.prev_idx = new_state_idx
+        if is_done:
+            self.is_done = is_done
+        return state_idx, new_state_idx
 
     def __getitem__(self, idx):
-        state_idx = self.state_indexes[idx]
-        state = self.states[state_idx]
+        state_indices = self.state_indexes[idx]
+        state = self.states[state_indices]
         return state
-        
+
 class ExperienceBuffer():
     def __init__(self, max_size):
         self.buffer = clist(max_size)
         self.state_buffer = LazyFrameStack(max_size)
- 
+
     def __len__(self):
         return len(self.buffer)
-    
+
     def append(self, experience):
         state, action, reward, is_done, new_state = experience
-        state_idx = self.state_buffer.append(state)
-        new_state_idx = self.state_buffer.append(new_state)
-        lazy_experience = Experience(self.state_buffer[state_idx],
+        state_idx, new_state_idx = self.state_buffer.append(state, new_state, is_done)
+        lazy_experience = Experience(state_idx,
                                      action, reward, is_done,
-                                     self.state_buffer[new_state_idx])
+                                     new_state_idx)
         self.buffer.append(lazy_experience)
+
+    def unpack_exp(self, i):
+        state_idx, action, reward, is_done, new_state_idx = self.buffer[i]
+        state = self.state_buffer[state_idx]
+        new_state = self.state_buffer[new_state_idx]
+        return state, action, reward, is_done, new_state
 
     def get_random_batch(self, batch_size):
         indices = random.sample(range(len(self.buffer)), batch_size)
-        states, actions, rewards, dones, next_states = zip(*[self.buffer[i] for i in indices])
-        return np.array(states), np.array(actions), \
-            np.array(rewards, dtype=np.float32), \
-            np.array(dones, dtype=np.uint8), np.array(next_states)
+        states, actions, rewards, dones, next_states = zip(*[self.unpack_exp(i) for i in indices])
+        return np.array(states, dtype=np.float32)/255.0, \
+            np.array(actions), np.array(rewards, dtype=np.float32), \
+            np.array(dones, dtype=np.uint8), \
+            np.array(next_states, dtype=np.float32)/255.0
 
 
-    
+
 class Agent():
     def __init__(self, env, exp_buffer):
         self.env = env
@@ -161,17 +165,17 @@ class Agent():
             action = self.env.action_space.sample()
         else:
             with torch.no_grad():
-                state_v = torch.Tensor([self.state]).to(device)
+                state_v = torch.Tensor([self.state/255.0]).to(device)
                 q_values = net(state_v)
                 action_v = q_values.max(1)[1]
-
                 action = int(action_v.item())
-        
+
         new_state, reward, is_done, _ = self.env.step(action)
         self.total_reward += reward
         
-        exp = Experience(self.state.astype(np.uint8), action, reward, is_done,
-                         new_state.astype(np.uint8))
+        reward = np.clip(reward, -1, 1) 
+        exp = Experience(self.state, action, reward, is_done,
+                         new_state)
         self.exp_buffer.append(exp)
         self.state = new_state
 
@@ -240,7 +244,7 @@ if __name__ == "__main__":
             frame_idx += 1
             if len(exp_buffer) < REPLAY_START_SIZE:
                 continue
-            
+
             if frame_idx % TGT_NET_UPDATE_FREQ == 0:
                 tgt_net.load_state_dict(net.state_dict())
 
@@ -267,7 +271,7 @@ if __name__ == "__main__":
         all_rewards.append(done_reward)
         mean_reward = np.mean(all_rewards[-100:])
 
-        
+
         print(f"Episode: {episode_idx}, simulated frames: {frame_idx}, mean reward 100 games: {mean_reward:.2f},\
  speed: {fps} f/s, Estimated time left: {estimated_time_left:.2f} h")
 
