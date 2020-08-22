@@ -2,7 +2,6 @@
 import wrappers
 import model
 import argparse
-import gym
 import time
 import random
 import numpy as np
@@ -11,24 +10,23 @@ import collections
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torchvision
 from torch.utils.tensorboard import SummaryWriter
 
 ENV_NAME = "BreakoutNoFrameskip-v4"
-MAX_FRAMES = 50*10**6
+MAX_FRAMES = 10*10**6
 SAVE_NETWORK_FRAMES = [0, 10**5, 5*10**5, 10**6, 5*10**6, 10**7, 25*10**6]
 
 MINIBATCH_SIZE = 32
 
-GAMMA = 0.99 # Discount factor
+GAMMA = 0.999  # Discount factor
 UPDATE_FREQ = 4
-LEARNING_RATE = 0.00025
+LEARNING_RATE = 0.000025
 GRAD_MOMENTUM = 0.95
 SQ_GRAD_MOMENTUM = 0.95
 MIN_SQ_GRAD = 0.01
 
 EPSILON_INITIAL = 1.0
-EPSILON_FINAL = 0.1
+EPSILON_FINAL = 0.05
 EPSILON_FINAL_FRAME = 10**6
 
 REPLAY_START_SIZE = 50000
@@ -39,9 +37,10 @@ TGT_NET_UPDATE_FREQ = 10000
 Experience = collections.namedtuple('Experience', ['state', 'action', 'reward',
                                                    'is_done', 'new_state'])
 
-class clist():
+
+class CircularList():
     def __init__(self, max_size):
-        self._list = [None]*max_size
+        self._list = [None for _ in range(max_size)]
         self._max_size = max_size
         self._size = 0
         self._index = 0
@@ -57,13 +56,14 @@ class clist():
     def __len__(self):
         return self._size
 
-    def __setitem__(self, idx, value):
-        assert idx < self._max_size, "index out of range"
-        self._list[idx] = value
+    # def __setitem__(self, idx, value):
+    #    assert idx < self._max_size, "index out of range"
+    #    self._list[idx] = value
+
 
 class ExperienceBuffer():
     def __init__(self, max_size):
-        self.buffer = clist(max_size)
+        self.buffer = CircularList(max_size)
 
     def __len__(self):
         return len(self.buffer)
@@ -72,13 +72,14 @@ class ExperienceBuffer():
         self.buffer.append(experience)
 
     def get_random_batch(self, batch_size):
+        # random.sample is uglier but also much faster than random.choice
         indices = random.sample(range(len(self.buffer)), batch_size)
-        states, actions, rewards, dones, next_states = zip(*[self.buffer[i] for i in indices])
+        states, actions, rewards, dones, next_states =\
+            zip(*[self.buffer[i] for i in indices])
         return state_to_torch(states), \
             np.array(actions), np.array(rewards), \
             np.array(dones, dtype=np.uint8), \
             state_to_torch(next_states)
-            
 
 
 def state_to_torch(state):
@@ -90,11 +91,13 @@ def state_to_torch(state):
     state = torch.Tensor(state).float()
     return state
 
+
 class Agent():
     def __init__(self, env, exp_buffer):
         self.env = env
         self.exp_buffer = exp_buffer
         self._reset()
+
     def _reset(self):
         self.state = self.env.reset()
         self.total_reward = 0.0
@@ -113,7 +116,7 @@ class Agent():
 
         new_state, reward, is_done, _ = self.env.step(action)
         self.total_reward += reward
-        
+
         exp = Experience(self.state, action, reward, is_done,
                          new_state)
         self.exp_buffer.append(exp)
@@ -124,7 +127,9 @@ class Agent():
             self._reset()
         return done_reward
 
+
 criterion = nn.MSELoss()
+
 
 def calc_action_values(net, tgt, batch, device="cpu"):
     states, actions, rewards, dones, next_states = batch
@@ -133,7 +138,7 @@ def calc_action_values(net, tgt, batch, device="cpu"):
     rewards_v = torch.tensor(rewards).to(device)
     done_mask = torch.tensor(dones, dtype=torch.bool).to(device)
     next_states_v = next_states.to(device)
-    
+
     predicted_state_action_values = net(states_v).gather(1, actions_v.unsqueeze(-1)).squeeze(-1)
     with torch.no_grad():
         next_state_values = tgt_net(next_states_v).max(1)[0]
@@ -156,7 +161,7 @@ if __name__ == "__main__":
     device = torch.device("cuda:1" if args.cuda else "cpu")
 
     env = wrappers.make_atari(args.env)
-    env = wrappers.wrap_deepmind(env, frame_stack=True)
+    env = wrappers.wrap_deepmind(env, episode_life=False, frame_stack=True)
     exp_buffer = ExperienceBuffer(REPLAY_MEMORY_SIZE)
     agent = Agent(env, exp_buffer)
 
@@ -165,7 +170,7 @@ if __name__ == "__main__":
     tgt_net.load_state_dict(net.state_dict())
 
     optimizer = optim.RMSprop(net.parameters(), lr=LEARNING_RATE,
-                           momentum=GRAD_MOMENTUM, eps=MIN_SQ_GRAD)
+                              momentum=GRAD_MOMENTUM, eps=MIN_SQ_GRAD)
 
     writer = SummaryWriter(comment="-" + args.env)
 
@@ -179,7 +184,8 @@ if __name__ == "__main__":
         total_loss = 0.0
         done_reward = None
         while done_reward is None:
-            eps = max(EPSILON_FINAL, EPSILON_INITIAL + (EPSILON_FINAL-EPSILON_INITIAL)/EPSILON_FINAL_FRAME*frame_idx)
+            eps = max(EPSILON_FINAL, 
+                      EPSILON_INITIAL + (EPSILON_FINAL-EPSILON_INITIAL)/EPSILON_FINAL_FRAME*frame_idx)
             done_reward = agent.play_step(net, eps, device)
 
             if frame_idx in SAVE_NETWORK_FRAMES:
@@ -196,7 +202,6 @@ if __name__ == "__main__":
             if frame_idx % UPDATE_FREQ != 0:
                 continue
 
-
             optimizer.zero_grad()
             batch = exp_buffer.get_random_batch(MINIBATCH_SIZE)
             state_action_values = calc_action_values(net, tgt_net, batch, device)
@@ -206,7 +211,7 @@ if __name__ == "__main__":
 
             total_loss += loss.item()
 
-        d_frames =  frame_idx-frame_idx_old
+        d_frames = frame_idx-frame_idx_old
         average_loss = total_loss/d_frames
         fps = int(d_frames/(time.time()-episode_t))
         t_left_approx_buffer.append((MAX_FRAMES-frame_idx)/(fps*3600))
@@ -214,7 +219,6 @@ if __name__ == "__main__":
 
         all_rewards.append(done_reward)
         mean_reward = np.mean(all_rewards[-100:])
-
 
         print(f"Episode: {episode_idx}, simulated frames: {frame_idx}, mean reward 100 games: {mean_reward:.2f},\
  speed: {fps} f/s, Estimated time left: {estimated_time_left:.2f} h")

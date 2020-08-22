@@ -1,3 +1,9 @@
+"""
+    These wrappers are not mine. All credit goes to OpenAi.
+    Source code can be found at:
+    https://github.com/openai/baselines/blob/master/baselines/common/atari_wrappers.py
+"""
+
 import numpy as np
 import os
 os.environ.setdefault('PATH', '')
@@ -37,9 +43,12 @@ class NoopResetEnv(gym.Wrapper):
     def step(self, ac):
         return self.env.step(ac)
 
+
 class FireResetEnv(gym.Wrapper):
     def __init__(self, env):
-        """Take action on reset for environments that are fixed until firing."""
+        """
+            Take action on reset for environments that are fixed until firing.
+        """
         gym.Wrapper.__init__(self, env)
         assert env.unwrapped.get_action_meanings()[1] == 'FIRE'
         assert len(env.unwrapped.get_action_meanings()) >= 3
@@ -57,6 +66,7 @@ class FireResetEnv(gym.Wrapper):
     def step(self, ac):
         return self.env.step(ac)
 
+
 class EpisodicLifeEnv(gym.Wrapper):
     def __init__(self, env):
         """Make end-of-life == end-of-episode, but only reset on true game over.
@@ -64,7 +74,7 @@ class EpisodicLifeEnv(gym.Wrapper):
         """
         gym.Wrapper.__init__(self, env)
         self.lives = 0
-        self.was_real_done  = True
+        self.was_real_done = True
 
     def step(self, action):
         obs, reward, done, info = self.env.step(action)
@@ -93,6 +103,7 @@ class EpisodicLifeEnv(gym.Wrapper):
         self.lives = self.env.unwrapped.ale.lives()
         return obs
 
+
 class MaxAndSkipEnv(gym.Wrapper):
     def __init__(self, env, skip=4):
         """Return only every `skip`-th frame"""
@@ -120,6 +131,7 @@ class MaxAndSkipEnv(gym.Wrapper):
 
     def reset(self, **kwargs):
         return self.env.reset(**kwargs)
+
 
 class ClipRewardEnv(gym.RewardWrapper):
     def __init__(self, env):
@@ -198,7 +210,9 @@ class FrameStack(gym.Wrapper):
         self.k = k
         self.frames = deque([], maxlen=k)
         shp = env.observation_space.shape
-        self.observation_space = spaces.Box(low=0, high=255, shape=(shp[:-1] + (shp[-1] * k,)), dtype=env.observation_space.dtype)
+        self.observation_space = spaces.Box(low=0, high=255,
+                                            shape=(shp[:-1] + (shp[-1] * k,)),
+                                            dtype=env.observation_space.dtype)
 
     def reset(self):
         ob = self.env.reset()
@@ -215,6 +229,7 @@ class FrameStack(gym.Wrapper):
         assert len(self.frames) == self.k
         return LazyFrames(list(self.frames))
 
+
 class ScaledFloatFrame(gym.ObservationWrapper):
     def __init__(self, env):
         gym.ObservationWrapper.__init__(self, env)
@@ -224,6 +239,7 @@ class ScaledFloatFrame(gym.ObservationWrapper):
         # careful! This undoes the memory optimization, use
         # with smaller replay buffers only.
         return np.array(observation).astype(np.float32) / 255.0
+
 
 class LazyFrames(object):
     def __init__(self, frames):
@@ -262,16 +278,17 @@ class LazyFrames(object):
     def frame(self, i):
         return self._force()[..., i]
 
+
 def make_atari(env_id, max_episode_steps=None):
     env = gym.make(env_id)
     assert 'NoFrameskip' in env.spec.id
     env = NoopResetEnv(env, noop_max=30)
     env = MaxAndSkipEnv(env, skip=4)
-    if max_episode_steps is not None:
-        env = TimeLimit(env, max_episode_steps=max_episode_steps)
     return env
 
-def wrap_deepmind(env, episode_life=True, clip_rewards=True, frame_stack=False, scale=False):
+
+def wrap_deepmind(env, episode_life=True, clip_rewards=True,
+                  frame_stack=False, scale=False):
     """Configure environment for DeepMind-style Atari.
     """
     if episode_life:
