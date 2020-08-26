@@ -1,16 +1,24 @@
 #!/usr/bin/env python3
-import wrappers
-import model
+"""
+    Training network. All parameters can be found directly under imported
+    modules. All the currently set parameters are the same as described in
+    DeepMinds paper Human-level control through deep reinforcement learning.
+    https://storage.googleapis.com/deepmind-media/dqn/DQNNaturePaper.pdf
+"""
 import argparse
 import time
 import random
-import numpy as np
 import collections
+import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+
+import wrappers
+import model
+from buffer import ExperienceBuffer
 
 ENV_NAME = "BreakoutNoFrameskip-v4"
 MAX_FRAMES = 10*10**6
@@ -38,51 +46,10 @@ Experience = collections.namedtuple('Experience', ['state', 'action', 'reward',
                                                    'is_done', 'new_state'])
 
 
-class CircularList():
-    def __init__(self, max_size):
-        self._list = [None for _ in range(max_size)]
-        self._max_size = max_size
-        self._size = 0
-        self._index = 0
-
-    def append(self, object):
-        self._list[self._index] = object
-        self._size = min(self._size+1, self._max_size)
-        self._index = (self._index + 1) % self._max_size
-
-    def __getitem__(self, idx):
-        return self._list[idx % self._max_size]
-
-    def __len__(self):
-        return self._size
-
-    # def __setitem__(self, idx, value):
-    #    assert idx < self._max_size, "index out of range"
-    #    self._list[idx] = value
-
-
-class ExperienceBuffer():
-    def __init__(self, max_size):
-        self.buffer = CircularList(max_size)
-
-    def __len__(self):
-        return len(self.buffer)
-
-    def append(self, experience):
-        self.buffer.append(experience)
-
-    def get_random_batch(self, batch_size):
-        # random.sample is uglier but also much faster than random.choice
-        indices = random.sample(range(len(self.buffer)), batch_size)
-        states, actions, rewards, dones, next_states =\
-            zip(*[self.buffer[i] for i in indices])
-        return state_to_torch(states), \
-            np.array(actions), np.array(rewards), \
-            np.array(dones, dtype=np.uint8), \
-            state_to_torch(next_states)
-
-
 def state_to_torch(state):
+    """
+        Convert state to torch tensor.
+    """
     state = np.array(state)/255.0
     if len(state.shape) == 3:
         state = [state.transpose((2, 0, 1))]
@@ -93,6 +60,14 @@ def state_to_torch(state):
 
 
 class Agent():
+    """
+        Agent playing step by step in environment and storing experiences in
+        experience buffer.
+        Args:
+            env (Environment):  Atari environment
+            exp_buffer (ExperienceBuffer):  experience buffer defined in
+                                            ./buffer.py
+    """
     def __init__(self, env, exp_buffer):
         self.env = env
         self.exp_buffer = exp_buffer
@@ -132,14 +107,16 @@ criterion = nn.MSELoss()
 
 
 def calc_action_values(net, tgt, batch, device="cpu"):
+    """ Calculate state action values from given batch. """
     states, actions, rewards, dones, next_states = batch
     states_v = states.to(device)
-    actions_v = torch.tensor(actions).to(device)
-    rewards_v = torch.tensor(rewards).to(device)
-    done_mask = torch.tensor(dones, dtype=torch.bool).to(device)
+    actions_v = actions.to(device)
+    rewards_v = rewards.to(device)
+    done_mask = dones.to(device)
     next_states_v = next_states.to(device)
 
-    predicted_state_action_values = net(states_v).gather(1, actions_v.unsqueeze(-1)).squeeze(-1)
+    predicted_state_action_values =\
+        net(states_v).gather(1, actions_v.unsqueeze(-1)).squeeze(-1)
     with torch.no_grad():
         next_state_values = tgt_net(next_states_v).max(1)[0]
         next_state_values[done_mask] = 0.0
@@ -174,18 +151,20 @@ if __name__ == "__main__":
 
     writer = SummaryWriter(comment="-" + args.env)
 
+    remaining_time_buffer = collections.deque(maxlen=100)
+    last_100_rewards = collections.deque(maxlen=100)
+
     episode_idx = 0
     frame_idx = 0
-    t_left_approx_buffer = collections.deque(maxlen=100)
-    all_rewards = []
-    while True:
+    while frame_idx < MAX_FRAMES:
         episode_t = time.time()
         frame_idx_old = frame_idx
         total_loss = 0.0
         done_reward = None
         while done_reward is None:
-            eps = max(EPSILON_FINAL, 
-                      EPSILON_INITIAL + (EPSILON_FINAL-EPSILON_INITIAL)/EPSILON_FINAL_FRAME*frame_idx)
+            eps = max(EPSILON_FINAL,
+                      EPSILON_INITIAL + (EPSILON_FINAL-EPSILON_INITIAL)
+                      / EPSILON_FINAL_FRAME*frame_idx)
             done_reward = agent.play_step(net, eps, device)
 
             if frame_idx in SAVE_NETWORK_FRAMES:
@@ -204,24 +183,29 @@ if __name__ == "__main__":
 
             optimizer.zero_grad()
             batch = exp_buffer.get_random_batch(MINIBATCH_SIZE)
-            state_action_values = calc_action_values(net, tgt_net, batch, device)
-            loss = criterion(*state_action_values)
+            action_values = calc_action_values(net, tgt_net, batch, device)
+            loss = criterion(*action_values)
             loss.backward()
             optimizer.step()
 
             total_loss += loss.item()
 
         d_frames = frame_idx-frame_idx_old
+
         average_loss = total_loss/d_frames
+
         fps = int(d_frames/(time.time()-episode_t))
-        t_left_approx_buffer.append((MAX_FRAMES-frame_idx)/(fps*3600))
-        estimated_time_left = np.mean(t_left_approx_buffer)
+        remaining_time_buffer.append((MAX_FRAMES-frame_idx)/(fps*3600))
+        remaining_time = np.mean(remaining_time_buffer)
 
-        all_rewards.append(done_reward)
-        mean_reward = np.mean(all_rewards[-100:])
+        last_100_rewards.append(done_reward)
+        mean_reward = np.mean(last_100_rewards)
 
-        print(f"Episode: {episode_idx}, simulated frames: {frame_idx}, mean reward 100 games: {mean_reward:.2f},\
- speed: {fps} f/s, Estimated time left: {estimated_time_left:.2f} h")
+        print(f"Episode: {episode_idx}, "
+              f"total frames: {frame_idx}, "
+              f"mean reward 100 games: {mean_reward:.2f}, "
+              f"speed: {fps} f/s, "
+              f"remaining time: {remaining_time:.2f} h")
 
         writer.add_scalar("average_loss", average_loss, frame_idx)
         writer.add_scalar("reward", done_reward, frame_idx)
@@ -230,7 +214,6 @@ if __name__ == "__main__":
         writer.add_scalar("frames_per_episode", d_frames, episode_idx)
         writer.add_scalar("speed", fps, frame_idx)
         episode_idx += 1
-        if frame_idx > MAX_FRAMES:
-            break
+
     writer.close()
     torch.save(net.state_dict(), args.env + "-final.dat")
