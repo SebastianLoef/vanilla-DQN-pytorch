@@ -11,6 +11,6 @@ you find any dissimilarities.
 ## Requirements
 The training process logs runs with tensorboard, this means you 
 either need tensorflow for it to work, or comment out the SummaryWriter in 
-[train_network](train_network.py) and all related code. You can install atari gym
+[train_network](train_network.py) and all it's related code. You can install atari gym
 with `pip install 'gym[atari]'`.
 
